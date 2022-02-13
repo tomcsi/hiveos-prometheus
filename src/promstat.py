@@ -52,7 +52,7 @@ def main():
             try:
                 mtemps = (stats["params"]["mtemp"])
             except:
-                mtemps = [0] * (len(hash)+1)
+                mtemps = [0] * (len(ctemps)+1)
             power = (stats["params"]["power"])
             fan = (stats["params"]["fan"])
             totalhash = (int((stats["params"]["total_khs"]))*1000)
