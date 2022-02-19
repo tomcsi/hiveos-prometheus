@@ -1,86 +1,189 @@
 #!/usr/bin/python3
-#pip3 install -r requirements.txt
 
+import argparse
+import datetime
+import logging
 import json
-from datetime import datetime, timedelta
+import re
+import sys
 from time import sleep
-import os
-from prometheus_client import Gauge,Info, start_http_server
+from typing import List, Tuple
 
-print("Get Stats")
+from prometheus_client import Gauge, start_http_server
+
+HIVEOS_CONFIG = '/hive-config/rig.conf'
+HIVEOS_GPU_DETECT_FILE = '/run/hive/gpu-detect.json'
+HIVEOS_STATS_FILE = '/run/hive/last_stat.json'
+GPU_STATS_FILE = '/run/hive/gpu-stats.json'
+
+SENSITIVE_CONFIG = ('RIG_PASSWD',)
+GPU_LABELS = ['rig', 'card', 'model', 'brand', 'vendor']
+METRICS = {
+    'gpu_fan': Gauge('hiveos_gpu_fan', 'GPU Fan Speed', GPU_LABELS),
+    'gpu_coretemp': Gauge('hiveos_gpu_core_temp', 'GPU Core Temp', GPU_LABELS),
+    'gpu_hash': Gauge('hiveos_gpu_hashrate', 'Hashrate', GPU_LABELS + ['coin', 'miner', 'miner_version']),
+    'gpu_jtemp': Gauge('hiveos_gpu_junction_temp', 'GPU Junction Temperature', GPU_LABELS),
+    'gpu_load': Gauge('hiveos_gpu_load', 'GPU load utilization', GPU_LABELS),
+    'gpu_memtemp': Gauge('hiveos_gpu_mem_temp', 'GPU Memory Temperature', GPU_LABELS),
+    'gpu_power': Gauge('hiveos_gpu_power_watts', 'GPU Power Consumption', GPU_LABELS),
+    'ratio': Gauge('hiveos_miner_ratio', 'Acceptance ratio', ['rig', 'type', 'coin', 'miner', 'miner_version']),
+    'total_hash': Gauge('hiveos_miner_hashrate', 'Hashrate', ['rig', 'coin', 'miner', 'miner_version']),
+}
+
+log = None
 
 
-def time_string():
-    current_time = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
-    return current_time
+class Gpu:
+    def __init__(self, index: int, gpu_detect_dict: dict) -> None:
+        self.model = gpu_detect_dict['name']
+        self.brand = gpu_detect_dict['brand']
+        self.vendor = gpu_detect_dict['subvendor']
+        self.bus_number_hex_str = gpu_detect_dict['busid']
+        self.bus_number_decimal = int(gpu_detect_dict['busid'].split(':')[0], 16)
+        self.card_index = index
+
+    def is_nvidia(self) -> bool:
+        return self.brand.lower() == 'nvidia'
+
+    def is_amd(self) -> bool:
+        return self.brand.lower() == 'amd'
 
 
-def hashrate(rates,total):
-    #print(str(len(rates)) + " CARDS")
-    for x in range(len(rates)):
-        g['hash'].labels(rig=rig,card = x).set(rates[x]*1000)
-        g['hash'].labels(rig=rig,card = "total").set(total)
+class Miner:
+    def __init__(self, name: str, stats: dict, total_khs: int, coin: str) -> None:
+        self.name = name
+        self.stats = stats
+        self.total_hs = total_khs * 1000
+        self.coin = coin
+
+    def is_gpu_miner(self) -> bool:
+        return self.stats['bus_numbers'][0] is not None
+
+    def is_cpu_miner(self) -> bool:
+        return self.stats['bus_numbers'][0] is None
 
 
-def timetowait():
-    delta = timedelta(minutes=1)
-    now = datetime.now()
-    next_minute = (now + delta).replace(microsecond=0,second=30)
-    wait_seconds = (next_minute - now)
-    wait_seconds = int((wait_seconds).total_seconds())
-    print("    " + time_string() + "   " + str(wait_seconds)+"s until next")
-    return(wait_seconds)
+def read_gpu_details() -> Tuple[List[Gpu], dict]:
+    gpu_by_index = []
+    gpu_by_bus_num = {}
+    log.debug('Reading GPU details from {}'.format(HIVEOS_GPU_DETECT_FILE))
+    with open(HIVEOS_GPU_DETECT_FILE, 'r') as gpu_detect:
+        for index, cur_gpu in enumerate(json.load(gpu_detect)):
+            gpu_obj = Gpu(index, cur_gpu)
+            gpu_by_index.append(gpu_obj)
+            gpu_by_bus_num[gpu_obj.bus_number_decimal] = gpu_obj
 
-def cardstats(ctemps,mtemps,power,fan):
-    for x in range(len(ctemps)):
-        
-        g['coretemp'].labels(rig=rig,card = x).set(ctemps[x])
-        g['memtemp'].labels(rig=rig,card = x).set(mtemps[x])
-        g['power'].labels(rig=rig,card = x).set(power[x])
-        g['fan'].labels(rig=rig,card = x).set(fan[x])
+    return gpu_by_index, gpu_by_bus_num
+
+
+def read_miner_stats() -> List[Miner]:
+    miners = []
+    log.debug('Reading statistics from {}'.format(HIVEOS_STATS_FILE))
+    with open(HIVEOS_STATS_FILE, 'r') as stats:
+        data = json.load(stats)['params']
+        for miner_name, meta in data['meta'].items():
+            for miner_num in range(1, len(data['meta']) + 1):
+                postfix = ''
+                if miner_num > 1:
+                    postfix = str(miner_num)
+
+                if miner_name == data['miner{}'.format(postfix)]:
+                    miner_stats = data['miner_stats{}'.format(postfix)]
+                    miner_khs = data['total_khs{}'.format(postfix)]
+                    coin = meta['coin']
+                    miners.append(Miner(miner_name, miner_stats, miner_khs, coin))
+                    break
+                else:
+                    continue
+
+    return miners
+
+
+def read_gpu_stats() -> dict:
+    log.debug('Reading GPU statistics from {}'.format(GPU_STATS_FILE))
+    with open(GPU_STATS_FILE, 'r') as gpu_stats:
+        return json.load(gpu_stats)
+
+
+def read_hiveos_config(path: str) -> dict:
+    log.debug('Reading HiveOS configuration from {}'.format(path))
+    config = {}
+    valid_line = re.compile('^\s*([a-zA-Z0-9_]+)="*([^"\n]+)"*\S *$')
+    with open(path, 'r') as hive_config:
+        for line in hive_config.readlines():
+            match = valid_line.match(line)
+            if not match:
+                continue
+            elif match.group(1) in SENSITIVE_CONFIG:
+                continue
+            config[match.group(1)] = match.group(2)
+
+    return config
+
+
+def init_logging(level):
+    global log
+    log = logging.getLogger(__name__)
+    log.addHandler(logging.NullHandler())
+
+    log_level_constant = getattr(logging, level.upper())
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    log.addHandler(console_handler)
+    log.setLevel(log_level_constant)
+
+
+def get_opts():
+    parser = argparse.ArgumentParser(description='HiveOS Prometheus exporter', formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-l', '--log_level', dest='log_level', help='The logging level', default='info')
+    parser.add_argument('-r', '--refresh', dest='refresh', help='How often to refresh metrics', default=60, type=int)
+    parser.add_argument('-p', '--port', dest='port', help='The listening port for the exporter', default=10101, type=int)
+    return parser.parse_args()
 
 
 def main():
-    print("Main")
-    start_http_server(7890)
-    while(True):
-        with open("/run/hive/last_stat.json") as json_data_file:
-            stats = json.load(json_data_file)
-            hash = (stats["params"]["miner_stats"]["hs"])
-            
-            ctemps = (stats["params"]["temp"])
-            try:
-                mtemps = (stats["params"]["mtemp"])
-            except:
-                mtemps = [0] * (len(ctemps)+1)
-            power = (stats["params"]["power"])
-            fan = (stats["params"]["fan"])
-            totalhash = (int((stats["params"]["total_khs"]))*1000)
-            miner = (stats["params"]["miner"])
-            miner_ver = (stats["params"]["miner_stats"]["ver"])
-            ars = (stats["params"]["miner_stats"]["ar"])
-            
-        i.info({'MinerVersion': miner_ver , 'MinerType': miner})
-           
-        g['ratio'].labels(rig=rig,type = "accepted").set(ars[0])
-        g['ratio'].labels(rig=rig,type = "rejected").set(ars[1])
-        hashrate(hash,totalhash)
-        cardstats(ctemps,mtemps,power,fan)
-        sleep(timetowait())
+    opts = get_opts()
+    init_logging(opts.log_level)
+    config = read_hiveos_config(HIVEOS_CONFIG)
+    rig = config['WORKER_NAME']
+    log.info('Starting HTTP server on port {}'.format(opts.port))
+    start_http_server(opts.port)
+    while True:
+        gpu_by_index, gpu_by_bus_num = read_gpu_details()
+        miners = read_miner_stats()
+        gpu_stats = read_gpu_stats()
+
+        for cur_miner in miners:
+            METRICS['ratio'].labels(rig=rig, type='accepted', coin=cur_miner.coin,
+                                    miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][0])
+            METRICS['ratio'].labels(rig=rig, type='rejected', coin=cur_miner.coin,
+                                    miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][1])
+            METRICS['total_hash'].labels(rig=rig, coin=cur_miner.coin, miner=cur_miner.name,
+                                         miner_version=cur_miner.stats['ver']).set(cur_miner.total_hs)
+            if cur_miner.is_gpu_miner():
+                for index, bus_number in enumerate(cur_miner.stats['bus_numbers']):
+                    cur_gpu = gpu_by_bus_num[bus_number]
+                    METRICS['gpu_hash'].labels(rig=rig, card=cur_gpu.card_index, model=cur_gpu.model,
+                                               brand=cur_gpu.brand, vendor=cur_gpu.vendor, coin=cur_miner.coin,
+                                               miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['hs'][index])
+            elif cur_miner.is_cpu_miner():
+                pass
+
+        for index, cur_gpu in enumerate(gpu_by_index):
+            labels = dict(rig=rig, card=cur_gpu.card_index, model=cur_gpu.model, brand=cur_gpu.brand, vendor=cur_gpu.vendor)
+            METRICS['gpu_coretemp'].labels(**labels).set(gpu_stats['temp'][index])
+            METRICS['gpu_power'].labels(**labels).set(gpu_stats['power'][index])
+            METRICS['gpu_fan'].labels(**labels).set(gpu_stats['fan'][index])
+            METRICS['gpu_load'].labels(**labels).set(gpu_stats['load'][index])
+            if cur_gpu.is_amd():
+                METRICS['gpu_memtemp'].labels(**labels).set(gpu_stats['mtemp'][index])
+                METRICS['gpu_jtemp'].labels(**labels).set(gpu_stats['jtemp'][index])
+
+        next_check = datetime.datetime.now() + datetime.timedelta(seconds=opts.refresh)
+        log.info('Next metric refresh at {}'.format(next_check.strftime('%Y-%d-%m %H:%M:%S')))
+        sleep(opts.refresh)
 
 
-rig = os.environ['RIG_NAME']
-print(rig)
-
-g = {}
-g['hash'] = Gauge('hive_hashrate','Hashrate',['rig','card'])
-g['coretemp'] = Gauge('hive_coretemp','GPU Core Temp',['rig','card'])
-g['memtemp'] = Gauge('hive_memtemp','GPU Memory Temperature',['rig','card'])
-g['power'] = Gauge('hive_power','GPU Power Consumption',['rig','card'])
-g['fan'] = Gauge('hive_fan','GPU Fan Speed',['rig','card'])
-g['ratio'] = Gauge('hive_ratio','Acceptance ratio',['rig','type'])
-
-i = {}
-i = Info('minername', 'Current Miner')
-
-main()
+if __name__ == '__main__':
+    main()
