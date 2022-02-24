@@ -159,6 +159,12 @@ def main():
                                     miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][0])
             METRICS['ratio'].labels(rig=rig, type='rejected', coin=cur_miner.coin,
                                     miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][1])
+            if len(cur_miner.stats['ar']) >= 3:
+                METRICS['ratio'].labels(rig=rig, type='invalid', coin=cur_miner.coin,
+                                    miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][2])
+            else:
+                log.debug('Miner "{}" does not support tracking invalid shares'.format(cur_miner.name))
+                                
             METRICS['total_hash'].labels(rig=rig, coin=cur_miner.coin, miner=cur_miner.name,
                                          miner_version=cur_miner.stats['ver']).set(cur_miner.total_hs)
             if cur_miner.is_gpu_miner():
