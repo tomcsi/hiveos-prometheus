@@ -7,8 +7,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 TimeoutStartSec=infinity
-Environment="RIG_NAME=Default"
-ExecStart=/usr/bin/python3  /root/hiveos-exporter/promstat.py
+ExecStart=/usr/bin/python3  /opt/hiveos-prometheus/bin/hiveos-exporter.py
 Restart=always
 RestartSec=45
 
