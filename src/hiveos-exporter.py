@@ -2,6 +2,7 @@
 
 import argparse
 import datetime
+import enum
 import logging
 import json
 import re
@@ -21,11 +22,13 @@ GPU_LABELS = ['rig', 'card', 'model', 'brand', 'vendor']
 METRICS = {
     'gpu_fan': Gauge('hiveos_gpu_fan', 'GPU Fan Speed', GPU_LABELS),
     'gpu_coretemp': Gauge('hiveos_gpu_core_temp', 'GPU Core Temp', GPU_LABELS),
-    'gpu_hash': Gauge('hiveos_gpu_hashrate', 'Hashrate', GPU_LABELS + ['coin', 'miner', 'miner_version']),
+    'gpu_hash': Gauge('hiveos_gpu_hashrate', 'GPU Hashrate', GPU_LABELS + ['coin', 'miner', 'miner_version']),
     'gpu_jtemp': Gauge('hiveos_gpu_junction_temp', 'GPU Junction Temperature', GPU_LABELS),
     'gpu_load': Gauge('hiveos_gpu_load', 'GPU load utilization', GPU_LABELS),
     'gpu_memtemp': Gauge('hiveos_gpu_mem_temp', 'GPU Memory Temperature', GPU_LABELS),
     'gpu_power': Gauge('hiveos_gpu_power_watts', 'GPU Power Consumption', GPU_LABELS),
+    'cpu_hash': Gauge('hiveos_cpu_hashrate', 'CPU Hashrate', ['rig', 'core', 'coin', 'miner', 'miner_version']),
+    'cpu_temp': Gauge('hiveos_cpu_temp', 'CPU Temperature', ['rig', 'cpu']),
     'ratio': Gauge('hiveos_miner_ratio', 'Acceptance ratio', ['rig', 'type', 'coin', 'miner', 'miner_version']),
     'total_hash': Gauge('hiveos_miner_hashrate', 'Hashrate', ['rig', 'coin', 'miner', 'miner_version']),
 }
@@ -76,27 +79,35 @@ def read_gpu_details() -> Tuple[List[Gpu], dict]:
     return gpu_by_index, gpu_by_bus_num
 
 
-def read_miner_stats() -> List[Miner]:
-    miners = []
+def read_stats_file() -> dict:
     log.debug('Reading statistics from {}'.format(HIVEOS_STATS_FILE))
     with open(HIVEOS_STATS_FILE, 'r') as stats:
-        data = json.load(stats)['params']
-        for miner_name, meta in data['meta'].items():
-            for miner_num in range(1, len(data['meta']) + 1):
-                postfix = ''
-                if miner_num > 1:
-                    postfix = str(miner_num)
+        return json.load(stats)
 
-                if miner_name == data['miner{}'.format(postfix)]:
-                    miner_stats = data['miner_stats{}'.format(postfix)]
-                    miner_khs = data['total_khs{}'.format(postfix)]
-                    coin = meta['coin']
-                    miners.append(Miner(miner_name, miner_stats, miner_khs, coin))
-                    break
-                else:
-                    continue
+
+def read_miner_stats() -> List[Miner]:
+    miners = []
+    data = read_stats_file()['params']
+    for miner_name, meta in data['meta'].items():
+        for miner_num in range(1, len(data['meta']) + 1):
+            postfix = ''
+            if miner_num > 1:
+                postfix = str(miner_num)
+
+            if miner_name == data['miner{}'.format(postfix)]:
+                miner_stats = data['miner_stats{}'.format(postfix)]
+                miner_khs = data['total_khs{}'.format(postfix)]
+                coin = meta['coin']
+                miners.append(Miner(miner_name, miner_stats, miner_khs, coin))
+                break
+            else:
+                continue
 
     return miners
+
+
+def read_cpu_temp() -> List:
+    return read_stats_file()['params']['cputemp']
 
 
 def read_gpu_stats() -> dict:
@@ -151,20 +162,17 @@ def main():
     start_http_server(opts.port)
     while True:
         gpu_by_index, gpu_by_bus_num = read_gpu_details()
-        miners = read_miner_stats()
-        gpu_stats = read_gpu_stats()
-
-        for cur_miner in miners:
+        for cur_miner in read_miner_stats():
             METRICS['ratio'].labels(rig=rig, type='accepted', coin=cur_miner.coin,
                                     miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][0])
             METRICS['ratio'].labels(rig=rig, type='rejected', coin=cur_miner.coin,
                                     miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][1])
             if len(cur_miner.stats['ar']) >= 3:
                 METRICS['ratio'].labels(rig=rig, type='invalid', coin=cur_miner.coin,
-                                    miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][2])
+                                        miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['ar'][2])
             else:
                 log.debug('Miner "{}" does not support tracking invalid shares'.format(cur_miner.name))
-                                
+
             METRICS['total_hash'].labels(rig=rig, coin=cur_miner.coin, miner=cur_miner.name,
                                          miner_version=cur_miner.stats['ver']).set(cur_miner.total_hs)
             if cur_miner.is_gpu_miner():
@@ -174,8 +182,11 @@ def main():
                                                brand=cur_gpu.brand, vendor=cur_gpu.vendor, coin=cur_miner.coin,
                                                miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(cur_miner.stats['hs'][index])
             elif cur_miner.is_cpu_miner():
-                pass
+                for index, hs in enumerate(cur_miner.stats['hs']):
+                    METRICS['cpu_hash'].labels(rig=rig, core=index, coin=cur_miner.coin,
+                                               miner=cur_miner.name, miner_version=cur_miner.stats['ver']).set(hs)
 
+        gpu_stats = read_gpu_stats()
         for index, cur_gpu in enumerate(gpu_by_index):
             labels = dict(rig=rig, card=cur_gpu.card_index, model=cur_gpu.model, brand=cur_gpu.brand, vendor=cur_gpu.vendor)
             METRICS['gpu_coretemp'].labels(**labels).set(gpu_stats['temp'][index])
@@ -185,6 +196,9 @@ def main():
             if cur_gpu.is_amd():
                 METRICS['gpu_memtemp'].labels(**labels).set(gpu_stats['mtemp'][index])
                 METRICS['gpu_jtemp'].labels(**labels).set(gpu_stats['jtemp'][index])
+
+        for index, cur_temp in enumerate(read_cpu_temp()):
+            METRICS['cpu_temp'].labels(rig=rig, cpu=index).set(cur_temp)
 
         next_check = datetime.datetime.now() + datetime.timedelta(seconds=opts.refresh)
         log.info('Next metric refresh at {}'.format(next_check.strftime('%Y-%d-%m %H:%M:%S')))
