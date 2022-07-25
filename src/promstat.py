@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timedelta
 from time import sleep
 import os
-from prometheus_client import Gauge,Info, start_http_server
+from prometheus_client import Gauge,Info, start_http_server, push_to_gateway, CollectorRegistry
 
 print("Get Stats")
 
@@ -39,8 +39,7 @@ def cardstats(ctemps,mtemps,power,fan):
         g['power'].labels(rig=rig,card = x).set(power[x])
         g['fan'].labels(rig=rig,card = x).set(fan[x])
 
-
-def main():
+def main_server():
     print("Main")
     start_http_server(7890)
     while(True):
@@ -68,19 +67,53 @@ def main():
         cardstats(ctemps,mtemps,power,fan)
         sleep(timetowait())
 
+def main_push():
+    print("Main")
+    while(True):
+        with open("./last_stat.json") as json_data_file:
+            stats = json.load(json_data_file)
+            hash = (stats["params"]["miner_stats"]["hs"])
+            
+            ctemps = (stats["params"]["temp"])
+            try:
+                mtemps = (stats["params"]["mtemp"])
+            except:
+                mtemps = [0] * (len(ctemps)+1)
+            power = (stats["params"]["power"])
+            fan = (stats["params"]["fan"])
+            totalhash = (int((stats["params"]["total_khs"]))*1000)
+            miner = (stats["params"]["miner"])
+            miner_ver = (stats["params"]["miner_stats"]["ver"])
+            ars = (stats["params"]["miner_stats"]["ar"])
+            
+        i.info({'MinerVersion': miner_ver , 'MinerType': miner})
+           
+        g['ratio'].labels(rig=rig,type = "accepted").set(ars[0])
+        g['ratio'].labels(rig=rig,type = "rejected").set(ars[1])
+        hashrate(hash,totalhash)
+        cardstats(ctemps,mtemps,power,fan)
+        sleep(timetowait())
+        push_to_gateway(pushserver, job=rig, registry=registry)
 
 rig = os.environ['RIG_NAME']
+mode = os.environ['MODE']
+
 print(rig)
 
+registry = CollectorRegistry()
 g = {}
-g['hash'] = Gauge('hive_hashrate','Hashrate',['rig','card'])
-g['coretemp'] = Gauge('hive_coretemp','GPU Core Temp',['rig','card'])
-g['memtemp'] = Gauge('hive_memtemp','GPU Memory Temperature',['rig','card'])
-g['power'] = Gauge('hive_power','GPU Power Consumption',['rig','card'])
-g['fan'] = Gauge('hive_fan','GPU Fan Speed',['rig','card'])
-g['ratio'] = Gauge('hive_ratio','Acceptance ratio',['rig','type'])
+g['hash'] = Gauge('hive_hashrate','Hashrate',['rig','card'], registry=registry)
+g['coretemp'] = Gauge('hive_coretemp','GPU Core Temp',['rig','card'], registry=registry)
+g['memtemp'] = Gauge('hive_memtemp','GPU Memory Temperature',['rig','card'], registry=registry)
+g['power'] = Gauge('hive_power','GPU Power Consumption',['rig','card'], registry=registry)
+g['fan'] = Gauge('hive_fan','GPU Fan Speed',['rig','card'], registry=registry)
+g['ratio'] = Gauge('hive_ratio','Acceptance ratio',['rig','type'], registry=registry)
 
 i = {}
 i = Info('minername', 'Current Miner')
 
-main()
+if mode == "push":
+    pushserver = os.environ['PUSHSERVER']
+    main_push()
+else:
+    main_server()
