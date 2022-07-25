@@ -70,7 +70,7 @@ def main_server():
 def main_push():
     print("Main")
     while(True):
-        with open("./last_stat.json") as json_data_file:
+        with open("/run/hive/last_stat.json") as json_data_file:
             stats = json.load(json_data_file)
             hash = (stats["params"]["miner_stats"]["hs"])
             
