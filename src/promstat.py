@@ -33,7 +33,6 @@ def timetowait():
 
 def cardstats(ctemps,mtemps,power,fan):
     for x in range(len(ctemps)):
-        
         g['coretemp'].labels(rig=rig,card = x).set(ctemps[x])
         g['memtemp'].labels(rig=rig,card = x).set(mtemps[x])
         g['power'].labels(rig=rig,card = x).set(power[x])
@@ -43,54 +42,76 @@ def main_server():
     print("Main")
     start_http_server(7890)
     while(True):
+        _totalhash = 0
         with open("/run/hive/last_stat.json") as json_data_file:
             stats = json.load(json_data_file)
-            hash = (stats["params"]["miner_stats"]["hs"])
-            
+            number_of_miners = len(stats["params"]["meta"])
+
+            power = (stats["params"]["power"])
+            fan = (stats["params"]["fan"])
             ctemps = (stats["params"]["temp"])
             try:
                 mtemps = (stats["params"]["mtemp"])
             except:
                 mtemps = [0] * (len(ctemps)+1)
-            power = (stats["params"]["power"])
-            fan = (stats["params"]["fan"])
-            totalhash = (int((stats["params"]["total_khs"]))*1000)
-            miner = (stats["params"]["miner"])
-            miner_ver = (stats["params"]["miner_stats"]["ver"])
-            ars = (stats["params"]["miner_stats"]["ar"])
+
+            for ii in range(number_of_miners):
+              minernum = 0
+              if ii > 0:
+                minernum = str(ii+1)
+              else:
+                minernum = ""
+              hash = (stats["params"]["miner_stats"+minernum]["hs"])
+              
+              totalhash = (int((stats["params"]["total_khs"+minernum]))*1000)
+              _totalhash += totalhash
+              miner = (stats["params"]["miner"+minernum])
+              miner_ver = (stats["params"]["miner_stats"+minernum]["ver"])
+              ars = (stats["params"]["miner_stats"+minernum]["ar"])
             
         i.info({'MinerVersion': miner_ver , 'MinerType': miner})
            
         g['ratio'].labels(rig=rig,type = "accepted").set(ars[0])
         g['ratio'].labels(rig=rig,type = "rejected").set(ars[1])
-        hashrate(hash,totalhash)
+        hashrate(hash,_totalhash)
         cardstats(ctemps,mtemps,power,fan)
         sleep(timetowait())
 
 def main_push():
     print("Main")
     while(True):
+        _totalhash = 0
         with open("/run/hive/last_stat.json") as json_data_file:
             stats = json.load(json_data_file)
-            hash = (stats["params"]["miner_stats"]["hs"])
-            
+            number_of_miners = len(stats["params"]["meta"])
+
+            power = (stats["params"]["power"])
+            fan = (stats["params"]["fan"])
             ctemps = (stats["params"]["temp"])
             try:
                 mtemps = (stats["params"]["mtemp"])
             except:
                 mtemps = [0] * (len(ctemps)+1)
-            power = (stats["params"]["power"])
-            fan = (stats["params"]["fan"])
-            totalhash = (int((stats["params"]["total_khs"]))*1000)
-            miner = (stats["params"]["miner"])
-            miner_ver = (stats["params"]["miner_stats"]["ver"])
-            ars = (stats["params"]["miner_stats"]["ar"])
+
+            for ii in range(number_of_miners):
+              minernum = 0
+              if ii > 0:
+                minernum = str(ii+1)
+              else:
+                minernum = ""
+              hash = (stats["params"]["miner_stats"+minernum]["hs"])
+              
+              totalhash = (int((stats["params"]["total_khs"+minernum]))*1000)
+              _totalhash += totalhash
+              miner = (stats["params"]["miner"+minernum])
+              miner_ver = (stats["params"]["miner_stats"+minernum]["ver"])
+              ars = (stats["params"]["miner_stats"+minernum]["ar"])
             
         i.info({'MinerVersion': miner_ver , 'MinerType': miner})
            
         g['ratio'].labels(rig=rig,type = "accepted").set(ars[0])
         g['ratio'].labels(rig=rig,type = "rejected").set(ars[1])
-        hashrate(hash,totalhash)
+        hashrate(hash,_totalhash)
         cardstats(ctemps,mtemps,power,fan)
         sleep(timetowait())
         push_to_gateway(pushserver, job=rig, registry=registry)
