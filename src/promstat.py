@@ -63,7 +63,7 @@ def main_server():
                 minernum = ""
               hash = (stats["params"]["miner_stats"+minernum]["hs"])
               
-              totalhash = (int((stats["params"]["total_khs"+minernum]))*1000)
+              totalhash = (float((stats["params"]["total_khs"+minernum]))*1000)
               _totalhash += totalhash
               miner = (stats["params"]["miner"+minernum])
               miner_ver = (stats["params"]["miner_stats"+minernum]["ver"])
@@ -101,7 +101,7 @@ def main_push():
                 minernum = ""
               hash = (stats["params"]["miner_stats"+minernum]["hs"])
               
-              totalhash = (int((stats["params"]["total_khs"+minernum]))*1000)
+              totalhash = (float((stats["params"]["total_khs"+minernum]))*1000)
               _totalhash += totalhash
               miner = (stats["params"]["miner"+minernum])
               miner_ver = (stats["params"]["miner_stats"+minernum]["ver"])
